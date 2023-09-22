@@ -1,136 +1,227 @@
+from typing import Union
 import torch
-import torch.nn as nn
-from torch.nn import Module
+from torch import nn
+from torch.nn import Linear, Conv2d, BatchNorm2d, ReLU, MaxPool2d, AdaptiveAvgPool2d
 
 
-class ResidualBlock(Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1):
-        super(ResidualBlock, self).__init__()
+class BasicBlock(nn.Module):
+    expansion: int = 1
 
-        self.expand = True if stride == 2 else False
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
+        super().__init__()
 
-        if self.expand:
-            self.conv1 = nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                padding=padding,
-                stride=2,
-            )
-        else:
-            self.conv1 = nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                padding=padding,
-                stride=1,
-            )
+        self.conv1 = Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+        )
+        self.bn1 = BatchNorm2d(num_features=out_channels)
 
-        self.conv2 = nn.Conv2d(
+        self.conv2 = Conv2d(
             in_channels=out_channels,
             out_channels=out_channels,
-            kernel_size=kernel_size,
-            padding=padding,
+            kernel_size=3,
             stride=1,
+            padding=1,
         )
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.act1 = nn.ReLU()
-        self.act2 = nn.ReLU()
+        self.bn2 = BatchNorm2d(num_features=out_channels)
 
-        if self.expand:
-            self.skip_connection = nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=1,
-                padding=0,
-                stride=2,
+        if stride != 1:
+            self.downsample = nn.Sequential(
+                Conv2d(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=1,
+                    stride=stride,
+                ),
+                BatchNorm2d(num_features=out_channels),
             )
         else:
-            self.skip_connection = nn.Identity()
+            self.downsample = None
 
-    def forward(self, x):
-        z = self.conv1(x)
-        z = self.bn1(z)
-        z = self.act1(z)
-        z = self.conv2(z)
-        z = self.bn2(z)
+        self.act = ReLU(inplace=True)
 
-        x = self.skip_connection(x)
-        x = x + z
-        x = self.act2(x)
-        return x
+    def forward(self, x) -> torch.Tensor:
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.act(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample != None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.act(out)
+
+        return out
 
 
-class ResNet(Module):
-    def __init__(self, in_channels, start_channels, class_num, blocks=[2, 2, 2, 2]):
-        super(ResNet, self).__init__()
+class Bottleneck(nn.Module):
+    expansion: int = 4
 
-        self.conv = nn.Conv2d(
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
+        super().__init__()
+
+        self.conv1 = Conv2d(
             in_channels=in_channels,
-            out_channels=start_channels,
-            kernel_size=7,
-            padding=3,
-            stride=2,
+            out_channels=out_channels,
+            kernel_size=1,
+            stride=stride,
         )
-        self.bn = nn.BatchNorm2d(start_channels)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.act = nn.ReLU()
+        self.bn1 = BatchNorm2d(num_features=out_channels)
 
-        self.layer1 = nn.Sequential(
-            *[ResidualBlock(start_channels, start_channels) for i in range(blocks[0])]
+        self.conv2 = Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         )
-        self.layer2 = nn.Sequential(
-            *[
-                ResidualBlock(start_channels, start_channels * 2, stride=2)
-                if i == 0
-                else ResidualBlock(start_channels * 2, start_channels * 2)
-                for i in range(blocks[1])
-            ]
+        self.bn2 = BatchNorm2d(num_features=out_channels)
+
+        self.conv3 = Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels * self.expansion,
+            kernel_size=1,
         )
-        self.layer3 = nn.Sequential(
-            *[
-                ResidualBlock(start_channels * 2, start_channels * 2 * 2, stride=2)
-                if i == 0
-                else ResidualBlock(start_channels * 2 * 2, start_channels * 2 * 2)
-                for i in range(blocks[2])
-            ]
+        self.bn3 = BatchNorm2d(out_channels * self.expansion)
+
+        if stride != 1 or in_channels != out_channels * self.expansion:
+            self.downsample = nn.Sequential(
+                Conv2d(
+                    in_channels=in_channels,
+                    out_channels=out_channels * self.expansion,
+                    kernel_size=1,
+                    stride=stride,
+                ),
+                BatchNorm2d(num_features=out_channels * self.expansion),
+            )
+        else:
+            self.downsample = None
+
+        self.act = ReLU(inplace=True)
+
+    def forward(self, x) -> torch.Tensor:
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.act(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.act(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample != None:
+            identity = self.downsample(identity)
+
+        out += identity
+        out = self.act(out)
+
+        return out
+
+
+class ResNet(nn.Module):
+    def __init__(
+        self,
+        block: Union[BasicBlock, Bottleneck],
+        layers: list[int],
+        num_classes: int = 10,
+    ) -> None:
+        super().__init__()
+
+        self.in_channels = 64
+
+        self.conv1 = Conv2d(
+            in_channels=3, out_channels=64, kernel_size=3, stride=1, padding=1
         )
-        self.layer4 = nn.Sequential(
-            *[
-                ResidualBlock(
-                    start_channels * 2 * 2, start_channels * 2 * 2 * 2, stride=2
+        self.bn1 = BatchNorm2d(num_features=64)
+        self.act = ReLU(inplace=True)
+        self.maxpool = MaxPool2d(kernel_size=2, stride=2)
+
+        self.layer1 = self._make_layer(
+            block, channels=64, num_layers=layers[0], stride=1
+        )
+        self.layer2 = self._make_layer(
+            block, channels=128, num_layers=layers[1], stride=2
+        )
+        self.layer3 = self._make_layer(
+            block, channels=256, num_layers=layers[2], stride=2
+        )
+        self.layer4 = self._make_layer(
+            block, channels=512, num_layers=layers[3], stride=2
+        )
+
+        self.avgpool = AdaptiveAvgPool2d(output_size=(1, 1))
+        self.fc = Linear(in_features=512 * block.expansion, out_features=num_classes)
+
+    def forward(self, x) -> torch.Tensor:
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.act(out)
+        out = self.maxpool(out)
+
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+
+        out = self.avgpool(out)
+        out = torch.flatten(out, start_dim=1)
+        out = self.fc(out)
+
+        return out
+
+    def _make_layer(
+        self,
+        block: Union[BasicBlock, Bottleneck],
+        channels: int,
+        num_layers: int,
+        stride: int,
+    ) -> nn.Sequential:
+        stride = [stride] + [1] * (num_layers - 1)
+
+        layers = []
+        for i in range(num_layers):
+            layers.append(
+                block(
+                    in_channels=self.in_channels,
+                    out_channels=channels,
+                    stride=stride[i],
                 )
-                if i == 0
-                else ResidualBlock(
-                    start_channels * 2 * 2 * 2, start_channels * 2 * 2 * 2
-                )
-                for i in range(blocks[3])
-            ]
-        )
+            )
+            self.in_channels = channels * block.expansion
 
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.flatten = nn.Flatten(start_dim=1)
-        self.fc = nn.Linear(
-            in_features=start_channels * 2 * 2 * 2, out_features=class_num
-        )
+        return nn.Sequential(*layers)
 
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.bn(x)
-        x = self.maxpool(x)
-        x = self.act(x)
 
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+def resnet18() -> ResNet:
+    return ResNet(block=BasicBlock, layers=[2, 2, 2, 2], num_classes=10)
 
-        x = self.avgpool(x)
-        x = self.flatten(x)
-        x = self.fc(x)
 
-        return x
+def resnet34() -> ResNet:
+    return ResNet(block=BasicBlock, layers=[3, 4, 6, 3], num_classes=10)
+
+
+def resnet50() -> ResNet:
+    return ResNet(block=Bottleneck, layers=[3, 4, 6, 3], num_classes=10)
+
+
+def resnet101() -> ResNet:
+    return ResNet(block=Bottleneck, layers=[3, 4, 23, 3], num_classes=10)
+
+
+def resnet152() -> ResNet:
+    return ResNet(block=Bottleneck, layers=[3, 8, 36, 3], num_classes=10)
 
 
 # test code
